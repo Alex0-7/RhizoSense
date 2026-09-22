@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Any
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -252,3 +253,6 @@ class WebSocketEvent(BaseSchema):
     event: str
     timestamp: str
     payload: Any
+
+
+FieldDetail.model_rebuild()
