@@ -269,3 +269,9 @@ export interface WebSocketEvent<T = any> {
   timestamp: string;
   payload: T;
 }
+
+export interface VisionDetectionResult {
+  detected: boolean;
+  disease: string | null;
+  confidence: number;
+}

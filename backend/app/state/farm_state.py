@@ -27,6 +27,7 @@ from backend.app.schemas.models import (
     MetricPoint,
     MetricSeries,
     RiskState,
+    VisionDetectionResult,
 )
 from backend.app.services.rules_engine import evaluate_field_condition, get_current_iso_time
 
@@ -72,6 +73,18 @@ class FarmStateManager:
         ]
 
         self.fields: Dict[str, Field] = {}
+        self.vision_detections: Dict[str, VisionDetectionResult] = {
+            "field-c": VisionDetectionResult(
+                detected=True,
+                disease="Early Blight",
+                confidence=0.91,
+            ),
+            "field-a": VisionDetectionResult(
+                detected=False,
+                disease=None,
+                confidence=0.12,
+            ),
+        }
         for cfg in baseline_configs:
             f_status, c_health, env, water, risk, ai_ass, rec, _ = evaluate_field_condition(
                 field_id=cfg["id"],
@@ -411,6 +424,58 @@ class FarmStateManager:
                 f.last_updated = now
                 return f
         return None
+
+    def get_vision_detection(self, field_id: str = "field-c") -> VisionDetectionResult:
+        if field_id in self.vision_detections:
+            return self.vision_detections[field_id]
+        return VisionDetectionResult(detected=False, disease=None, confidence=0.12)
+
+    def update_vision_detection(
+        self,
+        field_id: str,
+        detection: VisionDetectionResult,
+    ) -> Tuple[VisionDetectionResult, Optional[Notification]]:
+        prev = self.get_vision_detection(field_id)
+        self.vision_detections[field_id] = detection
+
+        notif = None
+        # Trigger ONE warning notification when detection transitions from false -> true
+        if not prev.detected and detection.detected:
+            now = get_current_iso_time()
+            field = self.get_field(field_id)
+            field_name = field.name if field else field_id.replace("-", " ").title()
+            disease_name = detection.disease or "Crop Disease"
+            conf_pct = round(detection.confidence * 100)
+            notif = Notification(
+                id=f"notif-vision-{field_id}-{int(datetime.now(timezone.utc).timestamp())}",
+                farm_id=self.farm.id,
+                field_id=field_id,
+                severity=NotificationSeverity.WARNING,
+                type=NotificationType.DISEASE,
+                title=f"{disease_name} detected in {field_name}",
+                message=f"Edge vision model detected {disease_name} with {conf_pct}% confidence.",
+                status=NotificationState.ACTIVE,
+                recommendation="Inspect canopy foliage and initiate targeted biological or fungicidal application.",
+                created_at=now,
+                updated_at=now,
+            )
+            self.notifications.insert(0, notif)
+
+        return detection, notif
+
+    def simulate_vision_detection(
+        self,
+        field_id: str = "field-c",
+        force_detected: Optional[bool] = None,
+    ) -> Tuple[VisionDetectionResult, Optional[Notification]]:
+        current = self.get_vision_detection(field_id)
+        new_detected = not current.detected if force_detected is None else force_detected
+        new_result = VisionDetectionResult(
+            detected=new_detected,
+            disease="Early Blight" if new_detected else None,
+            confidence=0.91 if new_detected else 0.12,
+        )
+        return self.update_vision_detection(field_id, new_result)
 
 
 # Global singleton farm state manager

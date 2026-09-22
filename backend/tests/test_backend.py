@@ -108,3 +108,45 @@ def test_simulator_telemetry_endpoint():
     get_res = client.get("/api/fields/field-c")
     assert get_res.json()["status"] == "critical"
     assert get_res.json()["water"]["soilMoisturePercent"] == 18.2
+
+
+def test_vision_detection_contract():
+    # 1. Reset baseline
+    client.post("/api/simulator/reset")
+
+    # 2. Query default detection
+    res = client.get("/api/vision/detection?fieldId=field-c")
+    assert res.status_code == 200
+    data = res.json()
+    assert "detected" in data
+    assert "disease" in data
+    assert "confidence" in data
+
+    # 3. Transition to false
+    res_false = client.post("/api/vision/detection?fieldId=field-c", json={
+        "detected": False,
+        "disease": None,
+        "confidence": 0.12,
+    })
+    assert res_false.status_code == 200
+    assert res_false.json()["detected"] is False
+
+    # 4. Transition false -> true (should create ONE warning notification)
+    res_true = client.post("/api/vision/detection?fieldId=field-c", json={
+        "detected": True,
+        "disease": "Early Blight",
+        "confidence": 0.91,
+    })
+    assert res_true.status_code == 200
+    assert res_true.json()["detected"] is True
+    assert res_true.json()["disease"] == "Early Blight"
+    assert res_true.json()["confidence"] == 0.91
+
+    # 5. Verify notification created
+    notifs_res = client.get("/api/notifications?fieldId=field-c")
+    assert notifs_res.status_code == 200
+    notifs = notifs_res.json()["notifications"]
+    vision_notifs = [n for n in notifs if "Early Blight" in n["title"]]
+    assert len(vision_notifs) >= 1
+    assert vision_notifs[0]["severity"] == "warning"
+

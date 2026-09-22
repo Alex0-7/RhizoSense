@@ -6,6 +6,7 @@ import {
   AnalyticsResponse,
   AnalyticsPeriod,
   MetricType,
+  VisionDetectionResult,
 } from "../types";
 
 const getApiBase = (): string => {
@@ -77,5 +78,36 @@ export async function fetchAnalytics(
   const url = `${API_BASE}/analytics?fieldId=${encodeURIComponent(fieldId)}&metrics=${encodeURIComponent(metricStr)}&period=${period}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch analytics: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchVisionDetection(fieldId: string = "field-c"): Promise<VisionDetectionResult> {
+  const res = await fetch(`${API_BASE}/vision/detection?fieldId=${encodeURIComponent(fieldId)}`);
+  if (!res.ok) throw new Error(`Failed to fetch vision detection: ${res.statusText}`);
+  return res.json();
+}
+
+export async function submitVisionDetection(
+  payload: VisionDetectionResult,
+  fieldId: string = "field-c"
+): Promise<VisionDetectionResult> {
+  const res = await fetch(`${API_BASE}/vision/detection?fieldId=${encodeURIComponent(fieldId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to submit vision detection: ${res.statusText}`);
+  return res.json();
+}
+
+export async function simulateVisionDetection(
+  fieldId: string = "field-c",
+  detected?: boolean
+): Promise<VisionDetectionResult> {
+  const query = detected !== undefined ? `&detected=${detected}` : "";
+  const res = await fetch(`${API_BASE}/vision/simulate?fieldId=${encodeURIComponent(fieldId)}${query}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to simulate vision detection: ${res.statusText}`);
   return res.json();
 }

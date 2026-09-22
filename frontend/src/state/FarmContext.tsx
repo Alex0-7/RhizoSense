@@ -17,6 +17,7 @@ interface FarmContextType {
   activeNotificationsCount: number;
   toasts: ToastItem[];
   dismissToast: (id: string) => void;
+  addNotification: (notif: Notification) => void;
   markRecommendationReviewed: (recId: string) => Promise<void>;
   resolveNotif: (notifId: string) => Promise<void>;
   refresh: () => Promise<void>;
@@ -54,6 +55,11 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const dismissToast = useCallback((toastId: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== toastId));
   }, []);
+
+  const addNotification = useCallback((notif: Notification) => {
+    setNotifications((prev) => [notif, ...prev.filter((n) => n.id !== notif.id)]);
+    addToast(notif);
+  }, [addToast]);
 
   // Auto-expire toasts after ~2500ms
   useEffect(() => {
@@ -139,6 +145,7 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeNotificationsCount,
         toasts,
         dismissToast,
+        addNotification,
         markRecommendationReviewed: markRecommendationReviewedAction,
         resolveNotif: resolveNotifAction,
         refresh: loadData,

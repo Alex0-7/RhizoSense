@@ -16,6 +16,7 @@ from backend.app.schemas.models import (
     Notification,
     AnalyticsResponse,
     AnalyticsQuery,
+    VisionDetectionResult,
 )
 from backend.app.state.farm_state import state_manager
 from backend.app.events.websocket_manager import ws_manager
@@ -233,3 +234,39 @@ async def reset_simulation():
     farm_summary = state_manager.get_farm_summary()
     await ws_manager.broadcast_event("farm.updated", farm_summary)
     return {"status": "reset", "message": "All fields reset to normal baseline state"}
+
+
+@router.get("/vision/detection", response_model=VisionDetectionResult)
+async def get_vision_detection(field_id: str = Query("field-c", alias="fieldId")):
+    return state_manager.get_vision_detection(field_id)
+
+
+@router.post("/vision/detection", response_model=VisionDetectionResult)
+async def submit_vision_detection(
+    payload: VisionDetectionResult,
+    field_id: str = Query("field-c", alias="fieldId"),
+):
+    result, notif = state_manager.update_vision_detection(field_id, payload)
+    await ws_manager.broadcast_event("vision.detection", {
+        "fieldId": field_id,
+        "detection": result.model_dump(by_alias=True),
+    })
+    if notif:
+        await ws_manager.broadcast_event("notification.created", notif)
+    return result
+
+
+@router.post("/vision/simulate", response_model=VisionDetectionResult)
+async def simulate_vision_detection(
+    field_id: str = Query("field-c", alias="fieldId"),
+    detected: Optional[bool] = Query(None),
+):
+    result, notif = state_manager.simulate_vision_detection(field_id, force_detected=detected)
+    await ws_manager.broadcast_event("vision.detection", {
+        "fieldId": field_id,
+        "detection": result.model_dump(by_alias=True),
+    })
+    if notif:
+        await ws_manager.broadcast_event("notification.created", notif)
+    return result
+

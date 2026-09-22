@@ -10,6 +10,7 @@ import { AIAssessmentCard } from "../components/cards/AIAssessmentCard";
 import { RecommendationCard } from "../components/cards/RecommendationCard";
 import { ChartContainer } from "../components/charts/ChartContainer";
 import { TrendChart } from "../components/charts/TrendChart";
+import { EdgeVisionPanel } from "../components/vision/EdgeVisionPanel";
 
 export const FieldDetailPage: React.FC = () => {
   const { fieldId } = useParams<{ fieldId: string }>();
@@ -150,6 +151,9 @@ export const FieldDetailPage: React.FC = () => {
           subtext={field.environmental.diseaseWeather.label}
         />
       </div>
+
+      {/* Edge Vision — Plant Pathology & Camera Stream */}
+      <EdgeVisionPanel fieldId={field.id} fieldName={field.name} />
 
       {/* AI Assessment & Actionable Recommendation */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

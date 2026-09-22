@@ -255,4 +255,10 @@ class WebSocketEvent(BaseSchema):
     payload: Any
 
 
+class VisionDetectionResult(BaseSchema):
+    detected: bool
+    disease: str | None = None
+    confidence: float
+
+
 FieldDetail.model_rebuild()

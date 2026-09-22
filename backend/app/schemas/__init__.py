@@ -40,6 +40,7 @@ from backend.app.schemas.models import (
     AnalyticsQuery,
     AnalyticsResponse,
     WebSocketEvent,
+    VisionDetectionResult,
 )
 
 __all__ = [
@@ -82,4 +83,5 @@ __all__ = [
     "AnalyticsQuery",
     "AnalyticsResponse",
     "WebSocketEvent",
+    "VisionDetectionResult",
 ]
