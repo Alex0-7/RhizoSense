@@ -1,0 +1,10 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+websockets>=12.0.0
+httpx>=0.27.0
+requests>=2.31.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+pytest>=8.0.0
+# Optional: inference-sdk>=0.9.0 (supported on Python <= 3.13; direct HTTP used for Python 3.14+)
