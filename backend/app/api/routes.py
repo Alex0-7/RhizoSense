@@ -147,6 +147,25 @@ async def trigger_read_sensors(payload: ReadSensorsRequest = Body(default_factor
     if notif:
         await ws_manager.broadcast_event("notification.created", notif)
 
+    mapped_field_id = state_manager._zone_to_field_id(diag.zone_id)
+    updated_field = state_manager.get_field(mapped_field_id)
+    if updated_field:
+        field_summary = FieldSummary(
+            id=updated_field.id,
+            farm_id=updated_field.farm_id,
+            name=updated_field.name,
+            crop=updated_field.crop,
+            area_acres=updated_field.area_acres,
+            health_percent=updated_field.crop_health.score,
+            soil_moisture_percent=updated_field.water.soil_moisture_percent,
+            temperature_c=updated_field.environmental.temperature_c,
+            status=updated_field.status,
+            issue=updated_field.risk.title if updated_field.status != Status.NORMAL else None,
+            last_updated=updated_field.last_updated,
+        )
+        await ws_manager.broadcast_event("field.updated", field_summary)
+        await ws_manager.broadcast_event("field.detail.updated", updated_field)
+
     farm_summary = state_manager.get_farm_summary()
     await ws_manager.broadcast_event("farm.updated", farm_summary)
 
@@ -170,6 +189,32 @@ async def run_vision_inference(request: InferenceRequest):
     await ws_manager.broadcast_event("diagnosis.created", diag)
     if notif:
         await ws_manager.broadcast_event("notification.created", notif)
+
+    mapped_field_id = state_manager._zone_to_field_id(diag.zone_id)
+    updated_field = state_manager.get_field(mapped_field_id)
+    if updated_field:
+        field_summary = FieldSummary(
+            id=updated_field.id,
+            farm_id=updated_field.farm_id,
+            name=updated_field.name,
+            crop=updated_field.crop,
+            area_acres=updated_field.area_acres,
+            health_percent=updated_field.crop_health.score,
+            soil_moisture_percent=updated_field.water.soil_moisture_percent,
+            temperature_c=updated_field.environmental.temperature_c,
+            status=updated_field.status,
+            issue=updated_field.risk.title if updated_field.status != Status.NORMAL else None,
+            last_updated=updated_field.last_updated,
+        )
+        await ws_manager.broadcast_event("field.updated", field_summary)
+        await ws_manager.broadcast_event("field.detail.updated", updated_field)
+
+    vision_det = state_manager.get_vision_detection(mapped_field_id)
+    await ws_manager.broadcast_event("vision.detection", {
+        "fieldId": mapped_field_id,
+        "zoneId": diag.zone_id,
+        "detection": vision_det.model_dump(by_alias=True),
+    })
 
     farm_summary = state_manager.get_farm_summary()
     await ws_manager.broadcast_event("farm.updated", farm_summary)
@@ -206,8 +251,37 @@ async def acknowledge_farmer_action(payload: ActionAcknowledgeRequest):
         raise HTTPException(status_code=404, detail=f"Zone '{payload.zone_id}' not found")
 
     now = get_current_iso_time()
-    if payload.recommendation_id:
-        state_manager.mark_recommendation_reviewed(payload.recommendation_id)
+    zone_updated, updated_field, resolved_ids = state_manager.acknowledge_zone_action(
+        zone_id=payload.zone_id,
+        action_taken=payload.action_taken,
+        recommendation_id=payload.recommendation_id,
+    )
+
+    if zone_updated:
+        await ws_manager.broadcast_event("zone.updated", zone_updated)
+
+    for nid in resolved_ids:
+        await ws_manager.broadcast_event(
+            "notification.resolved",
+            {"notificationId": nid, "fieldId": payload.zone_id, "resolvedAt": now},
+        )
+
+    if updated_field:
+        field_summary = FieldSummary(
+            id=updated_field.id,
+            farm_id=updated_field.farm_id,
+            name=updated_field.name,
+            crop=updated_field.crop,
+            area_acres=updated_field.area_acres,
+            health_percent=updated_field.crop_health.score,
+            soil_moisture_percent=updated_field.water.soil_moisture_percent,
+            temperature_c=updated_field.environmental.temperature_c,
+            status=updated_field.status,
+            issue=updated_field.risk.title if updated_field.status != Status.NORMAL else None,
+            last_updated=updated_field.last_updated,
+        )
+        await ws_manager.broadcast_event("field.updated", field_summary)
+        await ws_manager.broadcast_event("field.detail.updated", updated_field)
 
     await ws_manager.broadcast_event("farmer.action", {
         "zone_id": payload.zone_id,
@@ -215,10 +289,14 @@ async def acknowledge_farmer_action(payload: ActionAcknowledgeRequest):
         "timestamp": now,
     })
 
+    farm_summary = state_manager.get_farm_summary()
+    await ws_manager.broadcast_event("farm.updated", farm_summary)
+
     return {
         "status": "acknowledged",
         "zone_id": payload.zone_id,
         "action_taken": payload.action_taken,
+        "resolved_alerts": len(resolved_ids),
         "timestamp": now,
     }
 
@@ -429,12 +507,22 @@ async def submit_vision_detection(
     field_id: str = Query("field-c", alias="fieldId"),
 ):
     result, notif = state_manager.update_vision_detection(field_id, payload)
+    norm_zone = state_manager._normalize_zone_id(field_id)
+    zone_obj = state_manager.get_zone(norm_zone)
+    diag = state_manager.get_zone_diagnosis(norm_zone)
+    if zone_obj:
+        await ws_manager.broadcast_event("zone.updated", zone_obj)
+    if diag:
+        await ws_manager.broadcast_event("diagnosis.created", diag)
     await ws_manager.broadcast_event("vision.detection", {
         "fieldId": field_id,
+        "zoneId": norm_zone,
         "detection": result.model_dump(by_alias=True),
     })
     if notif:
         await ws_manager.broadcast_event("notification.created", notif)
+    farm_summary = state_manager.get_farm_summary()
+    await ws_manager.broadcast_event("farm.updated", farm_summary)
     return result
 
 
@@ -444,10 +532,20 @@ async def simulate_vision_detection(
     detected: Optional[bool] = Query(None),
 ):
     result, notif = state_manager.simulate_vision_detection(field_id, force_detected=detected)
+    norm_zone = state_manager._normalize_zone_id(field_id)
+    zone_obj = state_manager.get_zone(norm_zone)
+    diag = state_manager.get_zone_diagnosis(norm_zone)
+    if zone_obj:
+        await ws_manager.broadcast_event("zone.updated", zone_obj)
+    if diag:
+        await ws_manager.broadcast_event("diagnosis.created", diag)
     await ws_manager.broadcast_event("vision.detection", {
         "fieldId": field_id,
+        "zoneId": norm_zone,
         "detection": result.model_dump(by_alias=True),
     })
     if notif:
         await ws_manager.broadcast_event("notification.created", notif)
+    farm_summary = state_manager.get_farm_summary()
+    await ws_manager.broadcast_event("farm.updated", farm_summary)
     return result

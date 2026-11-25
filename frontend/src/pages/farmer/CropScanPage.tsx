@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useFarm } from "../../state/FarmContext";
 import { runVisionInference } from "../../services/api";
+import { SyncedCropVideoPlayer } from "../../components/vision/SyncedCropVideoPlayer";
+import { TimelineDetectionCue } from "../../config/visionMedia";
 import {
   Camera,
   Video,
@@ -9,7 +11,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   ArrowRight,
-  RefreshCw,
   Sparkles,
 } from "lucide-react";
 import { VisualEvidence } from "../../types/canonical";
@@ -51,6 +52,7 @@ export const CropScanPage: React.FC = () => {
   const navigate = useNavigate();
 
   const [selectedVideo, setSelectedVideo] = useState<string>("rhizome_rot_canopy.mp4");
+  const [autoTimeline, setAutoTimeline] = useState<boolean>(true);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanProgress, setScanProgress] = useState<number>(0);
   const [scanCompleted, setScanCompleted] = useState<boolean>(false);
@@ -58,6 +60,24 @@ export const CropScanPage: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const activePreset = VIDEO_PRESETS.find((p) => p.id === selectedVideo) || VIDEO_PRESETS[0];
+
+  const handleTimelineCue = useCallback(
+    async (cue: TimelineDetectionCue) => {
+      try {
+        const res = await runVisionInference({
+          zone_id: activeZoneId,
+          video_source: selectedVideo,
+          condition_override: cue.conditionOverride,
+        });
+        setDetectedEvidences(res.visual_evidence);
+        setScanCompleted(true);
+        await loadZoneDiagnosis(activeZoneId);
+      } catch {
+        // Ignore silent sync issues
+      }
+    },
+    [activeZoneId, selectedVideo, loadZoneDiagnosis]
+  );
 
   const handleStartScan = async () => {
     setIsScanning(true);
@@ -188,39 +208,19 @@ export const CropScanPage: React.FC = () => {
           })}
         </div>
 
-        {/* Video Canvas Simulation Viewport */}
-        <div className="mt-5 relative aspect-video bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 flex flex-col items-center justify-center text-center p-6 shadow-inner">
-          <div className="absolute top-4 left-4 flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-white text-xs font-mono">
-            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-            LIVE FEED • Zone {activeZoneId}
-          </div>
-
-          <div className="absolute top-4 right-4 bg-emerald-600/80 backdrop-blur-md text-white px-2.5 py-0.5 rounded text-xs font-mono">
-            1080p • 30 FPS
-          </div>
-
-          <Camera className="w-16 h-16 text-slate-600 mb-3" />
-          <p className="text-slate-300 text-sm font-medium">
-            Simulated Camera Stream: <span className="font-mono text-emerald-400">{selectedVideo}</span>
-          </p>
-          <p className="text-slate-500 text-xs mt-1 max-w-sm">
-            Ready to extract canopy frames and dispatch to canonical ML adapter.
-          </p>
-
-          {/* Scanning Overlay */}
-          {isScanning && (
-            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-white z-20">
-              <RefreshCw className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
-              <div className="text-base font-bold">Extracting & Analyzing Frames...</div>
-              <div className="w-64 bg-slate-700 h-2.5 rounded-full mt-3 overflow-hidden">
-                <div
-                  className="bg-emerald-500 h-full transition-all duration-200"
-                  style={{ width: `${scanProgress}%` }}
-                />
-              </div>
-              <div className="text-xs font-mono text-slate-400 mt-2">{scanProgress}% completed</div>
-            </div>
-          )}
+        {/* Live Playing Video Viewport + Timestamp Sync */}
+        <div className="mt-5">
+          <SyncedCropVideoPlayer
+            presetId={selectedVideo}
+            zoneLabel={`ZONE ${activeZoneId} CANOPY`}
+            autoTimelineEnabled={autoTimeline}
+            onToggleAutoTimeline={setAutoTimeline}
+            onCueTransition={handleTimelineCue}
+            isProcessing={isScanning}
+            processingTitle={`Extracting & Analyzing Frames (${scanProgress}%)...`}
+            processingSubtitle="Dispatching Canonical VisualEvidence to Fusion Engine"
+            badgeRightText="720p · LIVE VIDEO"
+          />
         </div>
 
         {/* Execute Scan Button */}

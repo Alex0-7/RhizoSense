@@ -65,6 +65,16 @@ app.add_middleware(
 app.include_router(api_router)
 
 
+@app.get("/")
+async def root_health():
+    return {
+        "status": "ok",
+        "service": "RhizoSense Data Service",
+        "version": "2.0.0",
+        "health": "/api/health",
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)

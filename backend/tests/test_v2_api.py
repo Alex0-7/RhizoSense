@@ -140,3 +140,40 @@ def test_vision_config_endpoint():
     assert "hardware_target" in data
 
 
+def test_farmer_and_admin_sync():
+    """Verify Farmer App zone inference & action acknowledge sync cleanly to FPO/Admin Field entities."""
+    client.post("/api/simulator/reset")
+
+    # 1. Farmer runs Rhizome Rot inference on Zone B3
+    infer_res = client.post("/api/vision/infer", json={
+        "zone_id": "B3",
+        "video_source": "rhizome_rot_canopy.mp4",
+        "condition_override": "rhizome_rot",
+    })
+    assert infer_res.status_code == 200
+
+    # 2. Verify Admin Field Detail for field-c reflects the updated risk & recommendation
+    field_res = client.get("/api/fields/field-c")
+    assert field_res.status_code == 200
+    field_data = field_res.json()
+    assert field_data["status"] in ["warning", "critical"]
+    assert "Rhizome Rot" in field_data["risk"]["title"] or "Early Blight" in field_data["risk"]["title"] or "Severe" in field_data["risk"]["title"]
+
+    # 3. Farmer acknowledges action on Zone B3
+    ack_res = client.post("/api/actions/acknowledge", json={
+        "zone_id": "B3",
+        "action_taken": "Applied Trichoderma drench",
+    })
+    assert ack_res.status_code == 200
+
+    # 4. Verify Admin Field recommendation is now marked reviewed
+    field_after = client.get("/api/fields/field-c").json()
+    assert field_after["recommendation"]["reviewed"] is True
+
+
+def test_root_health_endpoint():
+    res = client.get("/")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+

@@ -1,13 +1,15 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { FarmSummary, FieldSummary, Notification, ConnectionStatus, WebSocketEvent } from "../types";
 import { Zone, DiagnosisResult } from "../types/canonical";
 import {
   fetchFarmSummary,
   fetchZones,
   fetchZoneDiagnosis,
+  fetchNotifications,
   resolveNotification,
   reviewRecommendation,
   acknowledgeFarmerAction,
+  getApiConfigStatus,
 } from "../services/api";
 import { wsClient } from "../services/websocket";
 import { syncManager, SyncStateInfo } from "../services/syncManager";
@@ -55,6 +57,8 @@ interface FarmContextType {
   // Dual-mode interface (Farmer App vs FPO/Admin Dashboard)
   interfaceMode: "farmer" | "admin";
   setInterfaceMode: (mode: "farmer" | "admin") => void;
+  apiBaseUrl: string;
+  isMissingProdEnv: boolean;
 }
 
 const FarmContext = createContext<FarmContextType | undefined>(undefined);
@@ -72,6 +76,13 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [interfaceMode, setInterfaceMode] = useState<"farmer" | "admin">("farmer");
 
+  const activeZoneIdRef = useRef<string>(activeZoneId);
+  useEffect(() => {
+    activeZoneIdRef.current = activeZoneId;
+  }, [activeZoneId]);
+
+  const toastSeqRef = useRef<number>(0);
+
   // Sync Manager state subscription
   const [syncInfo, setSyncInfo] = useState<SyncStateInfo>(syncManager.getState());
 
@@ -79,11 +90,15 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return syncManager.subscribe(setSyncInfo);
   }, []);
 
-  // Toast Queue Manager: Max 3 visible, ~2.5s duration
+  // Toast Queue Manager: Max 3 visible, deduplicated, ~2.5s duration
   const addToast = useCallback((notif: Notification) => {
     setToasts((prev) => {
+      if (prev.some((t) => t.notification.id === notif.id)) {
+        return prev;
+      }
+      toastSeqRef.current += 1;
       const newItem: ToastItem = {
-        id: `toast-${notif.id}-${Date.now()}`,
+        id: `toast-${notif.id}-${toastSeqRef.current}`,
         notification: notif,
         enteredAt: Date.now(),
       };
@@ -141,8 +156,18 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setZones(zonesData);
 
       // Load active zone diagnosis
-      const diag = await fetchZoneDiagnosis(activeZoneId);
-      setActiveDiagnosis(diag);
+      try {
+        const diag = await fetchZoneDiagnosis(activeZoneId);
+        setActiveDiagnosis(diag);
+      } catch {
+        // Ignore if cache empty on first boot
+      }
+
+      // Load initial notifications so BOTH Farmer Queue & Admin Action Queue stay synced
+      const notifsRes = await fetchNotifications();
+      if (notifsRes.notifications) {
+        setNotifications(notifsRes.notifications);
+      }
 
       // Load legacy farm summary for Admin views
       const summary = await fetchFarmSummary();
@@ -176,7 +201,7 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
         offlineStorage.saveZones([updatedZone]).catch(() => {});
       } else if (event.event === "diagnosis.created") {
         const diag: DiagnosisResult = event.payload;
-        if (diag.zone_id.toUpperCase() === activeZoneId.toUpperCase()) {
+        if (diag.zone_id.toUpperCase() === activeZoneIdRef.current.toUpperCase()) {
           setActiveDiagnosis(diag);
         }
         offlineStorage.saveDiagnosis(diag).catch(() => {});
@@ -205,7 +230,7 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsubEvents();
       wsClient.disconnect();
     };
-  }, [activeZoneId, addToast]);
+  }, [addToast]);
 
   const markRecommendationReviewedAction = useCallback(async (recId: string) => {
     await reviewRecommendation(recId);
@@ -253,7 +278,8 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return zones.find((z) => z.zone_id.toUpperCase() === activeZoneId.toUpperCase()) || null;
   }, [zones, activeZoneId]);
 
-  const activeNotificationsCount = farmSummary?.activeNotifications ?? notifications.filter((n) => n.status === "active").length;
+  const activeNotificationsCount = notifications.filter((n) => n.status === "active").length;
+  const apiConfig = useMemo(() => getApiConfigStatus(), []);
 
   return (
     <FarmContext.Provider
@@ -289,9 +315,11 @@ export const FarmProvider: React.FC<{ children: React.ReactNode }> = ({ children
         toggleSimulatedOffline,
         flushSyncQueue,
 
-        // Navigation
+        // Navigation & Config
         interfaceMode,
         setInterfaceMode,
+        apiBaseUrl: apiConfig.apiBase,
+        isMissingProdEnv: apiConfig.isMissingProdEnv,
       }}
     >
       {children}

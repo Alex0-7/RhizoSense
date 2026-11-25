@@ -8,7 +8,7 @@ import { EnvironmentalRiskPanel } from "../components/environmental/Environmenta
 import { EdgeSystemPanel } from "../components/environmental/EdgeSystemPanel";
 
 export const OverviewPage: React.FC = () => {
-  const { farmSummary, fields, loading, error, refresh } = useFarm();
+  const { farmSummary, fields, loading, error, refresh, connectionStatus, isMissingProdEnv, apiBaseUrl } = useFarm();
 
   if (loading && !farmSummary) {
     return (
@@ -61,6 +61,32 @@ export const OverviewPage: React.FC = () => {
 
   return (
     <div className="space-y-6 sm:space-y-8">
+      {/* Deployment Configuration / Connection Notice */}
+      {isMissingProdEnv && (
+        <div className="p-4 rounded-card bg-amber-50 border border-amber-300 text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <strong>Backend URL Not Configured in Vercel (`VITE_API_URL` missing):</strong> Currently attempting local address (<code>{apiBaseUrl}</code>). Add <code>VITE_API_URL=https://&lt;your-render-service&gt;.onrender.com/api</code> in Vercel Project Settings → Environment Variables and redeploy.
+          </div>
+          <span className="font-mono text-[11px] bg-white px-2 py-1 rounded border border-amber-200 shrink-0">
+            Resilient Edge Cache Active
+          </span>
+        </div>
+      )}
+
+      {!isMissingProdEnv && connectionStatus === "disconnected" && (
+        <div className="p-3 rounded-card bg-slate-100 border border-slate-300 text-slate-800 text-xs flex items-center justify-between gap-2">
+          <span>
+            Live telemetry stream is connecting/reconnecting to <code>{apiBaseUrl}</code> (Render Free tier may take ~30s on cold start). Synchronized cached state is active.
+          </span>
+          <button
+            onClick={refresh}
+            className="px-2.5 py-1 rounded bg-white border border-slate-300 font-semibold hover:bg-slate-50 shrink-0"
+          >
+            Reconnect
+          </button>
+        </div>
+      )}
+
       {/* Farm Context Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-4 border-b border-borderDefault">
         <div>

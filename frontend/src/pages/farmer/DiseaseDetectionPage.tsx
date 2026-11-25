@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useFarm } from "../../state/FarmContext";
 import { runVisionInference, ingestSensorReadings } from "../../services/api";
 import { VoiceAdvisoryPlayer } from "../../components/voice/VoiceAdvisoryPlayer";
+import { SyncedCropVideoPlayer } from "../../components/vision/SyncedCropVideoPlayer";
+import { TimelineDetectionCue } from "../../config/visionMedia";
 import {
   Camera,
   Video,
-  Cpu,
-  AlertTriangle,
   ShieldCheck,
   CheckCircle2,
   Activity,
@@ -15,12 +15,7 @@ import {
   Thermometer,
   CloudRain,
   HelpCircle,
-  ArrowRight,
-  RefreshCw,
   Sparkles,
-  Volume2,
-  Play,
-  RotateCcw,
 } from "lucide-react";
 
 export const DiseaseDetectionPage: React.FC = () => {
@@ -31,6 +26,7 @@ export const DiseaseDetectionPage: React.FC = () => {
     activeDiagnosis,
     loadZoneDiagnosis,
     acknowledgeAction,
+    refresh,
   } = useFarm();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -44,15 +40,13 @@ export const DiseaseDetectionPage: React.FC = () => {
   }, [searchParams, activeZoneId, setActiveZoneId]);
 
   const [selectedVideo, setSelectedVideo] = useState<string>("rhizome_rot_canopy.mp4");
+  const [autoTimeline, setAutoTimeline] = useState<boolean>(true);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [videoLoaded, setVideoLoaded] = useState<boolean>(false);
-  const [videoError, setVideoError] = useState<boolean>(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [actionDone, setActionDone] = useState<boolean>(false);
   const [providerState, setProviderState] = useState<string>("roboflow");
   const [providerNote, setProviderNote] = useState<string | null>(null);
   const [framesEvaluated, setFramesEvaluated] = useState<number>(0);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const diag = activeDiagnosis;
   const isActionRequired = diag?.diagnosis.risk_level === "ACTION_REQUIRED";
@@ -79,7 +73,7 @@ export const DiseaseDetectionPage: React.FC = () => {
         zone_id: activeZoneId,
         video_source: selectedVideo,
         condition_override: targetCondition,
-        use_roboflow: !targetCondition, // Use real Roboflow unless explicitly overriding
+        use_roboflow: !targetCondition,
         sample_fps: 2.0,
       });
 
@@ -88,12 +82,13 @@ export const DiseaseDetectionPage: React.FC = () => {
       setFramesEvaluated(res.frames_processed || 1);
 
       await loadZoneDiagnosis(activeZoneId);
+      await refresh();
 
-      const provLabel = res.provider === "roboflow" ? "Roboflow API (turmeric-final-tmips/1)" : "Deterministic Demo Provider";
+      const provLabel = res.provider === "roboflow" ? "Roboflow API (turmeric-final-tmips/1)" : "Deterministic Edge Provider";
       if (res.alert_created) {
-        setFeedbackMessage(`Disease alert generated via ${provLabel}. Action dispatched to queue.`);
+        setFeedbackMessage(`Disease alert generated via ${provLabel}. Action dispatched to Farmer & FPO queues.`);
       } else {
-        setFeedbackMessage(`Inference complete via ${provLabel}. Evaluated as nominal.`);
+        setFeedbackMessage(`Inference complete via ${provLabel}. Canopy evaluated as nominal.`);
       }
     } catch (err: any) {
       setFeedbackMessage(`Inference error: ${err.message}`);
@@ -101,6 +96,85 @@ export const DiseaseDetectionPage: React.FC = () => {
       setIsProcessing(false);
     }
   };
+
+  // Automatic Timestamp Cue Handler for Presentation Mode
+  const handleTimelineCueTransition = useCallback(
+    async (cue: TimelineDetectionCue) => {
+      try {
+        if (cue.conditionOverride === "rhizome_rot") {
+          // Corroborate root-zone saturation sensors before running rhizome rot fusion
+          await ingestSensorReadings([
+            {
+              zone_id: activeZoneId,
+              metric: "soil_moisture",
+              value: 88.5,
+              unit: "%",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+            {
+              zone_id: activeZoneId,
+              metric: "soil_temperature",
+              value: 29.4,
+              unit: "°C",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+            {
+              zone_id: activeZoneId,
+              metric: "humidity",
+              value: 84.0,
+              unit: "%",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+          ]).catch(() => {});
+        } else if (cue.conditionOverride === "leaf_blotch") {
+          await ingestSensorReadings([
+            {
+              zone_id: activeZoneId,
+              metric: "soil_moisture",
+              value: 62.0,
+              unit: "%",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+            {
+              zone_id: activeZoneId,
+              metric: "soil_temperature",
+              value: 28.5,
+              unit: "°C",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+            {
+              zone_id: activeZoneId,
+              metric: "humidity",
+              value: 79.0,
+              unit: "%",
+              timestamp: new Date().toISOString(),
+              source: "sensor_source:read_sensors",
+            },
+          ]).catch(() => {});
+        }
+
+        const res = await runVisionInference({
+          zone_id: activeZoneId,
+          video_source: selectedVideo,
+          condition_override: cue.conditionOverride,
+          use_roboflow: false,
+          sample_fps: 2.0,
+        });
+        setProviderState(res.provider || "demo");
+        setProviderNote(`Video Timestamp Sync [${cue.startSec}s]: ${cue.summary}`);
+        setFramesEvaluated((prev) => prev + 2);
+        await loadZoneDiagnosis(activeZoneId);
+      } catch (e) {
+        console.warn("Timeline cue sync error:", e);
+      }
+    },
+    [activeZoneId, selectedVideo, loadZoneDiagnosis]
+  );
 
 
   // Trigger simulated read_sensors() update
@@ -209,90 +283,20 @@ export const DiseaseDetectionPage: React.FC = () => {
         {/* Left: Video Viewport & Detection Overlay (7 Cols) */}
         <div className="lg:col-span-7 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
-            {/* Viewport Box */}
-            <div className="relative aspect-video bg-slate-950 rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center">
-              {/* Attempt to render real video if present */}
-              <video
-                ref={videoRef}
-                src="/vision/plant-feed.mp4"
-                autoPlay
-                loop
-                muted
-                playsInline
-                onLoadedData={() => {
-                  setVideoLoaded(true);
-                  setVideoError(false);
-                }}
-                onError={() => {
-                  setVideoLoaded(false);
-                  setVideoError(true);
-                }}
-                className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
-                  videoLoaded && !videoError ? "opacity-90" : "opacity-0 pointer-events-none"
-                }`}
-              />
-
-              {/* Viewfinder HUD Overlays */}
-              <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/70 backdrop-blur-md px-3 py-1 rounded-full text-white text-xs font-mono z-10">
-                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
-                <span>CAM-01 · ZONE {activeZoneId} CANOPY</span>
-              </div>
-
-              <div className="absolute top-3 right-3 bg-emerald-700/80 backdrop-blur-md text-white px-2.5 py-0.5 rounded text-[11px] font-mono z-10">
-                1080p · 2 FPS SAMPLING · ROBOFLOW
-              </div>
-
-              {/* Simulated Camera Viewfinder if MP4 asset not on disk */}
-              {(!videoLoaded || videoError) && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-400 select-none">
-                  {/* Grid lines */}
-                  <div className="absolute inset-0 bg-[linear-gradient(to_right,#1f293715_1px,transparent_1px),linear-gradient(to_bottom,#1f293715_1px,transparent_1px)] bg-[size:32px_32px]" />
-
-                  {/* Corner brackets */}
-                  <div className="absolute top-6 left-6 w-8 h-8 border-t-2 border-l-2 border-emerald-500/60" />
-                  <div className="absolute top-6 right-6 w-8 h-8 border-t-2 border-r-2 border-emerald-500/60" />
-                  <div className="absolute bottom-6 left-6 w-8 h-8 border-b-2 border-l-2 border-emerald-500/60" />
-                  <div className="absolute bottom-6 right-6 w-8 h-8 border-b-2 border-r-2 border-emerald-500/60" />
-
-                  <Camera className="w-14 h-14 text-slate-700 mb-2 relative z-10" />
-                  <p className="text-xs text-slate-400 font-mono relative z-10">
-                    ROBOFLOW TURMERIC MODEL • REAL-TIME SAMPLING
-                  </p>
-                  <p className="text-[11px] text-slate-600 max-w-xs mt-1 relative z-10">
-                    Processing 2 FPS video stream for Zone {activeZoneId}. Video source:{" "}
-                    <span className="text-emerald-400">{selectedVideo}</span>
-                  </p>
-                </div>
-              )}
-
-              {/* Disease Detection Bounding Box on Suspect Foliage */}
-              {!isHealthy && (
-                <div className="absolute top-1/4 left-1/4 w-1/2 h-1/2 border-2 border-rose-500/80 rounded-lg bg-rose-500/10 backdrop-blur-2xs z-10 flex flex-col justify-between p-2 shadow-lg animate-pulse-subtle">
-                  <div className="flex justify-between items-start">
-                    <span className="bg-rose-600 text-white text-[10px] font-black uppercase px-2 py-0.5 rounded tracking-wide shadow-xs">
-                      {conditionName} • {confidencePercent}%
-                    </span>
-                    <span className="text-[9px] font-mono text-white/80 bg-black/40 px-1.5 py-0.5 rounded">
-                      ROBOFLOW ROI
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-rose-200 font-medium bg-black/60 px-2 py-1 rounded">
-                    Foliar symptom recognized by turmeric pathology model
-                  </div>
-                </div>
-              )}
-
-              {/* Processing Overlay */}
-              {isProcessing && (
-                <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-white z-20">
-                  <RefreshCw className="w-10 h-10 text-emerald-400 animate-spin mb-2" />
-                  <div className="text-sm font-bold">Sampling Video Frames @ 2 FPS & Running Roboflow Inference...</div>
-                  <div className="text-xs font-mono text-emerald-300 mt-1">
-                    Multimodal Fusion Engine Aggregating Telemetry
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Synchronized Live Crop Video & Timeline Detection Viewport */}
+            <SyncedCropVideoPlayer
+              presetId={selectedVideo}
+              zoneLabel={`ZONE ${activeZoneId} CANOPY`}
+              autoTimelineEnabled={autoTimeline}
+              onToggleAutoTimeline={setAutoTimeline}
+              onCueTransition={handleTimelineCueTransition}
+              externalConditionLabel={conditionName}
+              externalConfidencePercent={confidencePercent}
+              externalIsHealthy={isHealthy}
+              isProcessing={isProcessing}
+              processingTitle="Sampling Video Frames @ 2 FPS & Running Inference..."
+              processingSubtitle="Multimodal Fusion Engine Corroborating Telemetry"
+            />
 
             {/* Interactive Demo Controller Strip */}
             <div className="mt-4 pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">

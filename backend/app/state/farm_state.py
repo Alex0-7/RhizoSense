@@ -14,6 +14,7 @@ from backend.app.schemas.enums import (
     MetricType,
     AnalyticsPeriod,
     RiskType,
+    CropHealthCondition,
 )
 from backend.app.schemas.models import (
     Farm,
@@ -28,6 +29,12 @@ from backend.app.schemas.models import (
     MetricSeries,
     RiskState,
     VisionDetectionResult,
+    CropHealth,
+    RiskAssessment,
+    AIAssessment,
+    AssessmentIndicator,
+    ModelInfo,
+    Recommendation,
 )
 from backend.app.schemas.canonical import (
     Zone,
@@ -341,8 +348,8 @@ class FarmStateManager:
             self.zones[primary_zone].current_risk = new_diag.diagnosis.risk_level
             self.zones[primary_zone].last_updated = now
 
-        # Also sync to legacy field if primary_zone is B3 (Field C)
-        legacy_field_id = "field-c" if primary_zone == "B3" else "field-a"
+        # Also sync to legacy field cleanly
+        legacy_field_id = self._zone_to_field_id(primary_zone)
         sm = next((r.value for r in readings if "moisture" in r.metric.lower()), 46.0)
         temp = next((r.value for r in readings if "temp" in r.metric.lower()), 30.0)
         hum = next((r.value for r in readings if "hum" in r.metric.lower()), 58.0)
@@ -358,7 +365,7 @@ class FarmStateManager:
             pest_level=pest,
         )
 
-        # Create alert if risk elevated
+        # Create alert if risk elevated (avoid spamming identical consecutive notifications)
         notif = None
         if new_diag.diagnosis.risk_level in [RiskLevel.ATTENTION, RiskLevel.ACTION_REQUIRED] and prev_risk != new_diag.diagnosis.risk_level:
             sev = NotificationSeverity.CRITICAL if new_diag.diagnosis.risk_level == RiskLevel.ACTION_REQUIRED else NotificationSeverity.WARNING
@@ -393,6 +400,10 @@ class FarmStateManager:
         zone_id = self._normalize_zone_id(request.zone_id)
         request.zone_id = zone_id
 
+        prev_diag = self.zone_diagnoses.get(zone_id)
+        prev_condition = prev_diag.diagnosis.condition if prev_diag else None
+        prev_risk = prev_diag.diagnosis.risk_level if prev_diag else RiskLevel.HEALTHY
+
         # 1. Run ML Adapter with Roboflow / Demo support
         outcome = ml_adapter.run_inference_detailed(request)
         evidences = outcome.evidences
@@ -413,37 +424,186 @@ class FarmStateManager:
             self.zones[zone_id].current_risk = diag.diagnosis.risk_level
             self.zones[zone_id].last_updated = now
 
-        # Update legacy vision detections
+        # 4. Update legacy vision detections & synchronize mapped FPO Admin Field
         has_disease = any(e.detected and e.type not in ["healthy_canopy"] for e in evidences)
-        disease_name = next((e.type.replace("_", " ").title() for e in evidences if e.detected and e.type not in ["healthy_canopy"]), None)
+        disease_name = next(
+            (diag.diagnosis.condition.replace("_", " ").title() for e in evidences if e.detected and e.type not in ["healthy_canopy"]),
+            None,
+        )
         highest_conf = max((e.confidence for e in evidences), default=0.0)
 
-        legacy_id = "field-c" if zone_id == "B3" else "field-a"
+        legacy_id = self._zone_to_field_id(zone_id)
         self.vision_detections[legacy_id] = VisionDetectionResult(
             detected=has_disease,
             disease=disease_name,
-            confidence=highest_conf,
+            confidence=round(highest_conf, 2),
         )
+        self._sync_zone_to_field(zone_id, diag, evidences)
 
         notif = None
         if diag.diagnosis.risk_level in [RiskLevel.ACTION_REQUIRED, RiskLevel.ATTENTION]:
-            sev = NotificationSeverity.CRITICAL if diag.diagnosis.risk_level == RiskLevel.ACTION_REQUIRED else NotificationSeverity.WARNING
-            notif = Notification(
-                id=f"notif-vision-{zone_id}-{int(datetime.now(timezone.utc).timestamp())}",
-                farm_id=self.farm.id,
-                field_id=zone_id,
-                severity=sev,
-                type=NotificationType.DISEASE,
-                title=f"{diag.diagnosis.condition.replace('_', ' ').title()} identified in Zone {zone_id}",
-                message=diag.recommendation.reason or "Visual evidence corroborated by environmental conditions.",
-                status=NotificationState.ACTIVE,
-                recommendation=diag.recommendation.action,
-                created_at=now,
-                updated_at=now,
+            expected_title = f"{diag.diagnosis.condition.replace('_', ' ').title()} identified in Zone {zone_id}"
+            already_active = any(
+                n.status == NotificationState.ACTIVE and n.title == expected_title and n.field_id == zone_id
+                for n in self.notifications
             )
-            self.notifications.insert(0, notif)
+            if not already_active and (prev_condition != diag.diagnosis.condition or prev_risk != diag.diagnosis.risk_level):
+                sev = NotificationSeverity.CRITICAL if diag.diagnosis.risk_level == RiskLevel.ACTION_REQUIRED else NotificationSeverity.WARNING
+                notif = Notification(
+                    id=f"notif-vision-{zone_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+                    farm_id=self.farm.id,
+                    field_id=zone_id,
+                    severity=sev,
+                    type=NotificationType.DISEASE,
+                    title=expected_title,
+                    message=diag.recommendation.reason or "Visual evidence corroborated by environmental conditions.",
+                    status=NotificationState.ACTIVE,
+                    recommendation=diag.recommendation.action,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.notifications.insert(0, notif)
 
         return evidences, diag, notif, outcome.provider, outcome.provider_note, outcome.frames_processed
+
+    def _sync_zone_to_field(
+        self,
+        zone_id: str,
+        diag: DiagnosisResult,
+        evidences: List[VisualEvidence],
+    ) -> Optional[Field]:
+        """Keeps FPO/Admin Field entities synchronized with Farmer App Zone updates."""
+        field_id = self._zone_to_field_id(zone_id)
+        current_field = self.fields.get(field_id)
+        if not current_field:
+            return None
+
+        now = get_current_iso_time()
+        mapped_status = risk_level_to_status_str(diag.diagnosis.risk_level)
+        if mapped_status == "critical":
+            status_enum = Status.CRITICAL
+            health_score = 54.0
+            health_cond = CropHealthCondition.SEVERELY_STRESSED
+            conf_pct = 92.0
+        elif mapped_status == "warning":
+            status_enum = Status.WARNING
+            health_score = 72.0
+            health_cond = CropHealthCondition.STRESSED
+            conf_pct = 89.0
+        elif mapped_status == "advisory":
+            status_enum = Status.ADVISORY
+            health_score = 81.0
+            health_cond = CropHealthCondition.AT_RISK
+            conf_pct = 82.0
+        else:
+            status_enum = Status.NORMAL
+            health_score = 94.0
+            health_cond = CropHealthCondition.HEALTHY
+            conf_pct = 95.0
+
+        condition_title = diag.diagnosis.condition.replace("_", " ").title()
+        risk_type = RiskType.WATER_STRESS if "water" in diag.diagnosis.condition or "drought" in diag.diagnosis.condition else (
+            RiskType.NONE if status_enum == Status.NORMAL else RiskType.DISEASE
+        )
+
+        indicators = [
+            AssessmentIndicator(
+                id=f"vis-{ev.type}",
+                label=f"Canopy Vision: {ev.type.replace('_', ' ').title()}",
+                value=f"{round(ev.confidence * 100)}%",
+                contribution="high" if ev.detected and ev.type != "healthy_canopy" else "low",
+            )
+            for ev in evidences[:2]
+        ]
+        for sr in diag.sensor_evidence[:2]:
+            indicators.append(
+                AssessmentIndicator(
+                    id=f"sen-{sr.metric}",
+                    label=sr.metric.replace("_", " ").title(),
+                    value=f"{sr.value:.1f}{sr.unit}",
+                    contribution="high" if status_enum in [Status.CRITICAL, Status.WARNING] else "low",
+                )
+            )
+
+        updated_field = Field(
+            id=current_field.id,
+            farm_id=current_field.farm_id,
+            name=current_field.name,
+            crop=current_field.crop,
+            area_acres=current_field.area_acres,
+            status=status_enum,
+            crop_health=CropHealth(score=health_score, condition=health_cond, status=status_enum),
+            environmental=current_field.environmental,
+            water=current_field.water,
+            risk=RiskAssessment(
+                type=risk_type,
+                status=status_enum,
+                title=condition_title if status_enum != Status.NORMAL else "Optimal Growing Conditions",
+                description=diag.recommendation.reason or "Multimodal telemetry & vision assessment.",
+                detected_at=now if status_enum != Status.NORMAL else None,
+            ),
+            ai_assessment=AIAssessment(
+                title=condition_title,
+                summary=diag.recommendation.reason or f"Multimodal fusion assessment for Zone {zone_id} ({current_field.name}).",
+                confidence_percent=conf_pct,
+                indicators=indicators or current_field.ai_assessment.indicators,
+                model=ModelInfo(name="RhizoSense Multimodal Fusion V2", version="2.0.0", inference_type="vision_plus_telemetry"),
+                generated_at=now,
+            ),
+            recommendation=Recommendation(
+                id=f"rec-{field_id}-live",
+                title=f"Action for {current_field.name} (Zone {zone_id})",
+                action=diag.recommendation.action,
+                reason=diag.recommendation.reason or "Corroborated by multimodal fusion.",
+                priority=status_enum,
+                generated_at=now,
+                reviewed=False,
+            ),
+            last_updated=now,
+        )
+        self.fields[field_id] = updated_field
+        self._append_telemetry_point(field_id, MetricType.CROP_HEALTH, health_score, now)
+        self._append_telemetry_point(field_id, MetricType.DISEASE_RISK, 85.0 if status_enum == Status.CRITICAL else (60.0 if status_enum == Status.WARNING else 12.0), now)
+        self.farm.updated_at = now
+        self.edge_system.updated_at = now
+        self.edge_system.last_inference_at = now
+        return updated_field
+
+    def acknowledge_zone_action(
+        self,
+        zone_id: str,
+        action_taken: str,
+        recommendation_id: Optional[str] = None,
+    ) -> Tuple[Optional[Zone], Optional[Field], List[str]]:
+        """Marks zone/field recommendation reviewed and resolves active alerts across both apps."""
+        norm_zone = self._normalize_zone_id(zone_id)
+        mapped_field_id = self._zone_to_field_id(norm_zone)
+        now = get_current_iso_time()
+
+        updated_field = None
+        if recommendation_id:
+            updated_field = self.mark_recommendation_reviewed(recommendation_id)
+        if not updated_field and mapped_field_id in self.fields:
+            f = self.fields[mapped_field_id]
+            if f.recommendation:
+                f.recommendation.reviewed = True
+                f.recommendation.reviewed_at = now
+                f.last_updated = now
+                updated_field = f
+
+        resolved_ids: List[str] = []
+        for n in self.notifications:
+            if n.status == NotificationState.ACTIVE and n.field_id in [norm_zone, mapped_field_id]:
+                n.status = NotificationState.RESOLVED
+                n.resolved_at = now
+                n.updated_at = now
+                resolved_ids.append(n.id)
+
+        zone_obj = self.zones.get(norm_zone)
+        if zone_obj:
+            zone_obj.last_updated = now
+
+        return zone_obj, updated_field, resolved_ids
 
 
     def reconcile_sync_records(self, records: List[SyncRecord]) -> Dict[str, Any]:
@@ -472,6 +632,24 @@ class FarmStateManager:
             "records_processed": processed,
             "timestamp": now,
         }
+
+    def _zone_to_field_id(self, zone_id: str) -> str:
+        norm = (zone_id or "").upper().strip()
+        mapping = {
+            "B3": "field-c",
+            "FIELD-C": "field-c",
+            "A1": "field-a",
+            "FIELD-A": "field-a",
+            "A2": "field-b",
+            "FIELD-B": "field-b",
+            "C3": "field-d",
+            "FIELD-D": "field-d",
+            "D4": "field-e",
+            "FIELD-E": "field-e",
+            "E5": "field-f",
+            "FIELD-F": "field-f",
+        }
+        return mapping.get(norm, "field-c")
 
     def _normalize_zone_id(self, raw_id: str) -> str:
         clean = (raw_id or "").upper().strip()
@@ -717,9 +895,40 @@ class FarmStateManager:
         prev = self.get_vision_detection(field_id)
         self.vision_detections[field_id] = detection
 
+        # Keep canonical zone visuals and diagnosis in sync when triggered from Admin Field Detail
+        norm_zone = self._normalize_zone_id(field_id)
+        now = get_current_iso_time()
+        ev_type = "healthy_canopy"
+        if detection.detected:
+            d_low = (detection.disease or "").lower()
+            if "rot" in d_low or "wilt" in d_low:
+                ev_type = "rhizome_discoloration"
+            elif "dry" in d_low or "necrosis" in d_low:
+                ev_type = "necrosis"
+            else:
+                ev_type = "leaf_spots"
+
+        ev = VisualEvidence(
+            type=ev_type,
+            detected=detection.detected,
+            confidence=detection.confidence,
+            source="edge_vision_sync",
+            details=f"{detection.disease or 'Healthy canopy'} evaluated via Edge Vision panel.",
+        )
+        self.zone_visuals[norm_zone] = [ev]
+        diag = fusion_engine.fuse_zone_evidence(
+            zone_id=norm_zone,
+            sensor_readings=self.zone_sensors.get(norm_zone, []),
+            visual_evidence=[ev],
+        )
+        self.zone_diagnoses[norm_zone] = diag
+        if norm_zone in self.zones:
+            self.zones[norm_zone].current_risk = diag.diagnosis.risk_level
+            self.zones[norm_zone].last_updated = now
+        self._sync_zone_to_field(norm_zone, diag, [ev])
+
         notif = None
         if not prev.detected and detection.detected:
-            now = get_current_iso_time()
             field = self.get_field(field_id)
             field_name = field.name if field else field_id.replace("-", " ").title()
             disease_name = detection.disease or "Crop Disease"

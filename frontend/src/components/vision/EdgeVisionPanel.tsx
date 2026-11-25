@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Camera, AlertTriangle, CheckCircle2, RefreshCw, Cpu, Eye } from "lucide-react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Camera, AlertTriangle, CheckCircle2, RefreshCw, Cpu } from "lucide-react";
 import { VisionDetectionResult, Notification } from "../../types";
-import { fetchVisionDetection, simulateVisionDetection } from "../../services/api";
+import { fetchVisionDetection, simulateVisionDetection, submitVisionDetection } from "../../services/api";
 import { useFarm } from "../../state/FarmContext";
+import { SyncedCropVideoPlayer } from "./SyncedCropVideoPlayer";
+import { TimelineDetectionCue } from "../../config/visionMedia";
 
 interface EdgeVisionPanelProps {
   fieldId: string;
@@ -14,24 +16,12 @@ export const EdgeVisionPanel: React.FC<EdgeVisionPanelProps> = ({ fieldId, field
 
   const [detection, setDetection] = useState<VisionDetectionResult>({
     detected: true,
-    disease: "Early Blight",
-    confidence: 0.91,
+    disease: "Leaf Blotch",
+    confidence: 0.89,
   });
-  const [videoLoaded, setVideoLoaded] = useState<boolean>(false);
-  const [videoError, setVideoError] = useState<boolean>(false);
+  const [autoTimeline, setAutoTimeline] = useState<boolean>(true);
   const [simulating, setSimulating] = useState<boolean>(false);
-  const [timestamp, setTimestamp] = useState<string>(new Date().toLocaleTimeString());
-
-  const videoRef = useRef<HTMLVideoElement>(null);
   const lastDetectedRef = useRef<boolean | null>(null);
-
-  // Live HUD clock
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTimestamp(new Date().toLocaleTimeString());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   // Fetch initial detection state from backend
   useEffect(() => {
@@ -102,6 +92,23 @@ export const EdgeVisionPanel: React.FC<EdgeVisionPanelProps> = ({ fieldId, field
     }
   };
 
+  const handleCueTransition = useCallback(
+    async (cue: TimelineDetectionCue) => {
+      const nextResult: VisionDetectionResult = {
+        detected: cue.severity !== "healthy",
+        disease: cue.severity === "healthy" ? null : cue.label,
+        confidence: cue.confidence,
+      };
+      setDetection(nextResult);
+      try {
+        await submitVisionDetection(nextResult, fieldId);
+      } catch {
+        // Offline resilient
+      }
+    },
+    [fieldId]
+  );
+
   const confidencePercent = Math.round((detection.confidence || 0) * 100);
 
   return (
@@ -141,97 +148,20 @@ export const EdgeVisionPanel: React.FC<EdgeVisionPanelProps> = ({ fieldId, field
 
       {/* Main Content Grid */}
       <div className="p-4 sm:p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Left: Video Feed Display (7 cols) */}
+        {/* Left: Synchronized Self-Playing Plant Video Feed (7 cols) */}
         <div className="lg:col-span-7 flex flex-col">
-          <div className="relative rounded-lg overflow-hidden bg-[#111613] aspect-video flex items-center justify-center border border-borderDefault/80 shadow-inner group">
-            {/* HTML5 Video */}
-            <video
-              ref={videoRef}
-              src="/vision/plant-feed.mp4"
-              autoPlay
-              loop
-              muted
-              playsInline
-              onLoadedData={() => {
-                setVideoLoaded(true);
-                setVideoError(false);
-              }}
-              onError={() => {
-                setVideoLoaded(false);
-                setVideoError(true);
-              }}
-              className={`w-full h-full object-cover transition-opacity duration-300 ${
-                videoLoaded && !videoError ? "opacity-100" : "hidden"
-              }`}
-            />
-
-            {/* Fallback Viewfinder when local MP4 is awaiting placement */}
-            {(!videoLoaded || videoError) && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-[#18231D] via-[#101814] to-[#0A0F0D] text-white p-6 select-none">
-                {/* Subtle grid pattern */}
-                <div
-                  className="absolute inset-0 opacity-15 pointer-events-none"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(to right, #52B788 1px, transparent 1px), linear-gradient(to bottom, #52B788 1px, transparent 1px)",
-                    backgroundSize: "28px 28px",
-                  }}
-                />
-
-                {/* Simulated plant canopy silhouette & leaf scan target */}
-                <div className="relative flex flex-col items-center z-10">
-                  <div className="w-16 h-16 rounded-full bg-[#2D6A4F]/20 border border-[#52B788]/40 flex items-center justify-center mb-3">
-                    <Eye size={30} className="text-[#52B788] animate-pulse" />
-                  </div>
-                  <span className="text-xs font-semibold tracking-wider uppercase text-emerald-400">
-                    Simulated Crop Camera Feed
-                  </span>
-                  <span className="text-[11px] text-gray-400 mt-1 max-w-xs text-center leading-relaxed">
-                    Place MP4 at <code className="text-emerald-300 bg-black/40 px-1 py-0.5 rounded font-mono">public/vision/plant-feed.mp4</code>
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Simulated Edge AI Bounding Box Overlay when Disease is Detected */}
-            {detection.detected && (
-              <div className="absolute top-[28%] left-[32%] w-[38%] h-[42%] border-2 border-[#E67E22] bg-[#E67E22]/15 rounded pointer-events-none flex flex-col justify-between p-1 z-20 animate-pulse-subtle">
-                <span className="self-start text-[10px] font-mono font-bold bg-[#E67E22] text-white px-1.5 py-0.5 rounded shadow">
-                  {detection.disease || "Early Blight"} [{confidencePercent}%]
-                </span>
-                <div className="self-end text-[9px] font-mono text-amber-200 bg-black/60 px-1 rounded">
-                  POS: 324,188 ROI-01
-                </div>
-              </div>
-            )}
-
-            {/* Viewfinder HUD Overlays */}
-            <div className="absolute top-2.5 left-3 right-3 flex items-center justify-between text-[11px] font-mono text-white/90 z-20 pointer-events-none drop-shadow">
-              <div className="flex items-center gap-1.5 bg-black/60 px-2 py-0.5 rounded backdrop-blur-sm">
-                <Camera size={12} className="text-emerald-400" />
-                <span>CAM-01 · {fieldName.toUpperCase()} CANOPY</span>
-              </div>
-              <div className="flex items-center gap-1.5 bg-black/60 px-2 py-0.5 rounded backdrop-blur-sm">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-semibold text-emerald-400 tracking-wider">LIVE</span>
-                <span className="text-white/60">24 FPS</span>
-              </div>
-            </div>
-
-            <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-[10px] font-mono text-white/80 z-20 pointer-events-none drop-shadow">
-              <div className="bg-black/60 px-2 py-0.5 rounded backdrop-blur-sm">
-                <span>QUALCOMM NPU · 4.2ms INFERENCE</span>
-              </div>
-              <div className="bg-black/60 px-2 py-0.5 rounded backdrop-blur-sm">
-                <span>{timestamp} UTC</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-2 flex items-center justify-between text-[11px] text-secondaryText px-1">
-            <span>Video Stream: Continuous loop (muted)</span>
-            <span className="font-mono">Zone C Canopy · Node-03</span>
-          </div>
+          <SyncedCropVideoPlayer
+            presetId="rhizome_rot_canopy.mp4"
+            zoneLabel={`${fieldName.toUpperCase()} CANOPY`}
+            autoTimelineEnabled={autoTimeline}
+            onToggleAutoTimeline={setAutoTimeline}
+            onCueTransition={handleCueTransition}
+            externalConditionLabel={detection.detected ? detection.disease || "Leaf Blotch" : "HEALTHY CANOPY"}
+            externalConfidencePercent={confidencePercent}
+            externalIsHealthy={!detection.detected}
+            isProcessing={simulating}
+            badgeRightText="720p · SYNCED FPO + FARMER"
+          />
         </div>
 
         {/* Right: Visual Detection Result Panel (5 cols) */}
